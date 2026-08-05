@@ -13,11 +13,11 @@ from api.extractors import get_redgifs_media, get_twitter_media, get_instagram_r
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Regex Patterns
+# Regex Patterns (Supports share parameters & short URLs)
 REDGIFS_REGEX = r'(?:https?://)?(?:www\.)?redgifs\.com/watch/([a-zA-Z0-9]+)'
 TWITTER_REGEX = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/([0-9]+)'
-INSTA_REGEX   = r'(?:https?://)?(?:www\.)?instagram\.com/(?:reel|reels)/([a-zA-Z0-9_-]+)'
-REDDIT_REGEX  = r'(?:https?://)?(?:www\.)?(?:reddit\.com/r/[^/]+/comments/|redd\.it/)([a-zA-Z0-9]+)'
+INSTA_REGEX   = r'(?:https?://)?(?:www\.)?instagram\.com/(?:reel|reels|p)/([a-zA-Z0-9_-]+)'
+REDDIT_REGEX  = r'(?:https?://)?(?:www\.|old\.)?(?:reddit\.com/(?:r/[^/]+/(?:comments|s)/|s/)|redd\.it/)([a-zA-Z0-9_-]+)'
 
 async def process_update(update_data):
     if not BOT_TOKEN:
