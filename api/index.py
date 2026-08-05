@@ -8,7 +8,7 @@ from io import BytesIO
 from http.server import BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update, Bot
-from extractors import get_redgifs_media, get_twitter_media, get_instagram_reel, get_reddit_media
+from api.extractors import get_redgifs_media, get_twitter_media, get_instagram_reel, get_reddit_media
 
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -21,6 +21,7 @@ REDDIT_REGEX  = r'(?:https?://)?(?:www\.)?(?:reddit\.com/r/[^/]+/comments/|redd\
 
 async def process_update(update_data):
     if not BOT_TOKEN:
+        logging.error("BOT_TOKEN environment variable is missing!")
         return
 
     bot = Bot(token=BOT_TOKEN)
