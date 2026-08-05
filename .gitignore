@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment variables (NEVER commit your bot token!)
+.env
+.env.*
+
+# Python Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Vercel local build folder
+.vercel/
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS System Files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
