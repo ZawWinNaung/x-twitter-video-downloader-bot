@@ -8,20 +8,20 @@ from io import BytesIO
 from http.server import BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update, Bot
+
 from api.extractors import get_redgifs_media, get_twitter_media, get_instagram_reel, get_reddit_media
 
 load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Regex Patterns (Supports share parameters & short URLs)
+# Flexible Regex Patterns
 REDGIFS_REGEX = r'(?:https?://)?(?:www\.)?redgifs\.com/watch/([a-zA-Z0-9]+)'
 TWITTER_REGEX = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/([0-9]+)'
 INSTA_REGEX   = r'(?:https?://)?(?:www\.)?instagram\.com/(?:reel|reels|p)/([a-zA-Z0-9_-]+)'
-REDDIT_REGEX  = r'(?:https?://)?(?:www\.|old\.)?(?:reddit\.com/(?:r/[^/]+/(?:comments|s)/|s/)|redd\.it/)([a-zA-Z0-9_-]+)'
+REDDIT_REGEX = r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?(?:reddit\.com|redd\.it)/[^\s]+'
 
 async def process_update(update_data):
     if not BOT_TOKEN:
-        logging.error("BOT_TOKEN environment variable is missing!")
         return
 
     bot = Bot(token=BOT_TOKEN)
@@ -35,7 +35,6 @@ async def process_update(update_data):
     chat_id = message.chat_id
     message_id = message.message_id
 
-    # Handle /start
     if text.startswith('/start'):
         await bot.send_message(
             chat_id=chat_id,
@@ -45,7 +44,6 @@ async def process_update(update_data):
         )
         return
 
-    # Route request to platform extractor
     gif_match = re.search(REDGIFS_REGEX, text)
     tw_match = re.search(TWITTER_REGEX, text)
     ig_match = re.search(INSTA_REGEX, text)
@@ -70,7 +68,7 @@ async def process_update(update_data):
         elif ig_match:
             video_bytes, thumb_bytes, width, height = await get_instagram_reel(ig_match.group(1))
         elif rd_match:
-            video_bytes, thumb_bytes, width, height = await get_reddit_media(rd_match.group(1))
+            video_bytes, thumb_bytes, width, height = await get_reddit_media(rd_match.group(1), raw_text=text)
 
         if video_bytes:
             await bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text="📤 Uploading video...")
@@ -98,7 +96,6 @@ async def process_update(update_data):
         traceback.print_exc()
         await bot.edit_message_text(chat_id=chat_id, message_id=status_msg.message_id, text="❌ Error processing link. Please try again later.")
 
-# Vercel Serverless Handler
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
