@@ -11,70 +11,53 @@ from telegram import Update, Bot
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Matches x.com and twitter.com status links
+# Regex to extract tweet status ID from x.com or twitter.com URLs
 TWITTER_REGEX = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/([0-9]+)'
 
 
 async def get_twitter_media(status_id: str):
-    """Extracts highest quality Twitter/X MP4 video stream using public syndication API."""
-    syndication_url = f"https://cdn.syndication.twimg.com/tweet-result?id={status_id}&token=x"
+    """Extracts single video stream from X/Twitter via vxtwitter API."""
+    api_url = f"https://api.vxtwitter.com/Twitter/status/{status_id}"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
-
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-        try:
-            res = await client.get(syndication_url, headers=headers)
-            if res.status_code != 200:
-                return None, None, None
-
-            data = res.json()
+    headers = {"User-Agent": "TelegramBot/1.0"}
+    
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        res = await client.get(api_url, headers=headers)
+        if res.status_code != 200:
+            return None, None, None, None
             
-            # Locate video info inside tweet media
-            video_info = None
-            if "video" in data:
-                video_info = data["video"]
-            elif "mediaDetails" in data:
-                for media in data["mediaDetails"]:
-                    if media.get("type") == "video" or media.get("type") == "animated_gif":
-                        video_info = media.get("video_info")
-                        break
+        data = res.json()
+        media_list = data.get("media_extended", [])
+        
+        video_url = None
+        thumb_url = None
+        
+        # Look for the first video in the status
+        for media in media_list:
+            if media.get("type") == "video":
+                video_url = media.get("url")
+                thumb_url = media.get("thumbnail_url")
+                break
+                
+        if not video_url:
+            return None, None, None, None
+            
+        # Download video & thumbnail bytes
+        v_resp = await client.get(video_url)
+        video_bytes = v_resp.content if v_resp.status_code == 200 else None
+        
+        thumb_bytes = None
+        if thumb_url:
+            t_resp = await client.get(thumb_url)
+            if t_resp.status_code == 200:
+                thumb_bytes = t_resp.content
 
-            if not video_info or "variants" not in video_info:
-                return None, None, None
-
-            # Filter for MP4 variants and pick highest bitrate / resolution
-            mp4_variants = [
-                v for v in video_info["variants"] 
-                if v.get("content_type") == "video/mp4" and "url" in v
-            ]
-
-            if not mp4_variants:
-                return None, None, None
-
-            # Sort variants by bitrate (highest quality first)
-            mp4_variants.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
-            best_video_url = mp4_variants[0]["url"]
-
-            # Download raw MP4 stream
-            v_resp = await client.get(best_video_url, headers=headers)
-            if v_resp.status_code == 200:
-                aspect_ratio = video_info.get("aspect_ratio", [None, None])
-                width = aspect_ratio[0] if len(aspect_ratio) > 0 else None
-                height = aspect_ratio[1] if len(aspect_ratio) > 1 else None
-                return v_resp.content, width, height
-
-        except Exception as e:
-            print(f"Error fetching Twitter media: {e}")
-
-    return None, None, None
+    return video_bytes, thumb_bytes, None, None
 
 
 async def process_update(update_data):
     if not BOT_TOKEN:
-        print("CRITICAL ERROR: BOT_TOKEN environment variable is missing!")
+        print("CRITICAL ERROR: BOT_TOKEN is missing!")
         return
 
     bot = Bot(token=BOT_TOKEN)
@@ -88,7 +71,7 @@ async def process_update(update_data):
     chat_id = message.chat_id
     message_id = message.message_id
 
-    # Handle /start command
+    # Handle /start
     if text.startswith('/start'):
         await bot.send_message(
             chat_id=chat_id,
@@ -98,7 +81,7 @@ async def process_update(update_data):
         )
         return
 
-    # Check for Twitter link match
+    # Match Twitter/X link
     tw_match = re.search(TWITTER_REGEX, text)
     if not tw_match:
         return
@@ -111,7 +94,7 @@ async def process_update(update_data):
 
     try:
         status_id = tw_match.group(1)
-        video_bytes, width, height = await get_twitter_media(status_id)
+        video_bytes, thumb_bytes, width, height = await get_twitter_media(status_id)
 
         if video_bytes:
             await bot.edit_message_text(
@@ -129,6 +112,11 @@ async def process_update(update_data):
                 "reply_to_message_id": message_id,
                 "supports_streaming": True
             }
+
+            if thumb_bytes:
+                thumb_file = BytesIO(thumb_bytes)
+                thumb_file.name = "thumb.jpg"
+                send_kwargs["thumbnail"] = thumb_file
 
             await bot.send_video(**send_kwargs)
             await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
@@ -166,4 +154,4 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Twitter Video Downloader Bot active.')
+        self.wfile.write(b'Twitter Downloader Bot operational.')
