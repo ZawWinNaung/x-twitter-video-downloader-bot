@@ -6,24 +6,75 @@ import asyncio
 import traceback
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler
-from dotenv import load_dotenv
+import httpx
 from telegram import Update, Bot
 
-# Imports from api directory
-from api.extractors import get_redgifs_media, get_twitter_media, get_instagram_reel, get_reddit_media
-
-load_dotenv()
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Flexible Regex Patterns
-REDGIFS_REGEX = r'(?:https?://)?(?:www\.)?redgifs\.com/watch/([a-zA-Z0-9]+)'
+# Matches x.com and twitter.com status links
 TWITTER_REGEX = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/([0-9]+)'
-INSTA_REGEX   = r'(?:https?://)?(?:www\.)?instagram\.com/(?:reel|reels|p)/([a-zA-Z0-9_-]+)'
-REDDIT_REGEX  = r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?(?:reddit\.com|redd\.it)/[^\s]+'
+
+
+async def get_twitter_media(status_id: str):
+    """Extracts highest quality Twitter/X MP4 video stream using public syndication API."""
+    syndication_url = f"https://cdn.syndication.twimg.com/tweet-result?id={status_id}&token=x"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        try:
+            res = await client.get(syndication_url, headers=headers)
+            if res.status_code != 200:
+                return None, None, None
+
+            data = res.json()
+            
+            # Locate video info inside tweet media
+            video_info = None
+            if "video" in data:
+                video_info = data["video"]
+            elif "mediaDetails" in data:
+                for media in data["mediaDetails"]:
+                    if media.get("type") == "video" or media.get("type") == "animated_gif":
+                        video_info = media.get("video_info")
+                        break
+
+            if not video_info or "variants" not in video_info:
+                return None, None, None
+
+            # Filter for MP4 variants and pick highest bitrate / resolution
+            mp4_variants = [
+                v for v in video_info["variants"] 
+                if v.get("content_type") == "video/mp4" and "url" in v
+            ]
+
+            if not mp4_variants:
+                return None, None, None
+
+            # Sort variants by bitrate (highest quality first)
+            mp4_variants.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+            best_video_url = mp4_variants[0]["url"]
+
+            # Download raw MP4 stream
+            v_resp = await client.get(best_video_url, headers=headers)
+            if v_resp.status_code == 200:
+                aspect_ratio = video_info.get("aspect_ratio", [None, None])
+                width = aspect_ratio[0] if len(aspect_ratio) > 0 else None
+                height = aspect_ratio[1] if len(aspect_ratio) > 1 else None
+                return v_resp.content, width, height
+
+        except Exception as e:
+            print(f"Error fetching Twitter media: {e}")
+
+    return None, None, None
+
 
 async def process_update(update_data):
     if not BOT_TOKEN:
-        print("CRITICAL ERROR: BOT_TOKEN is missing!")
+        print("CRITICAL ERROR: BOT_TOKEN environment variable is missing!")
         return
 
     bot = Bot(token=BOT_TOKEN)
@@ -37,43 +88,30 @@ async def process_update(update_data):
     chat_id = message.chat_id
     message_id = message.message_id
 
-    # Handle /start
+    # Handle /start command
     if text.startswith('/start'):
         await bot.send_message(
             chat_id=chat_id,
-            text="👋 Send me a video link from **RedGIFs, X (Twitter), Instagram Reels, or Reddit**!",
+            text="👋 Send me a video link from **X (Twitter)**!",
             parse_mode="Markdown",
             reply_to_message_id=message_id
         )
         return
 
-    # Check for platform link matches
-    gif_match = re.search(REDGIFS_REGEX, text)
+    # Check for Twitter link match
     tw_match = re.search(TWITTER_REGEX, text)
-    ig_match = re.search(INSTA_REGEX, text)
-    rd_match = re.search(REDDIT_REGEX, text)
-
-    if not any([gif_match, tw_match, ig_match, rd_match]):
+    if not tw_match:
         return
 
     status_msg = await bot.send_message(
         chat_id=chat_id,
-        text="🔎 Processing video link...",
+        text="🔎 Processing Twitter video link...",
         reply_to_message_id=message_id
     )
 
-    video_bytes, thumb_bytes, width, height = None, None, None, None
-
     try:
-        if gif_match:
-            video_bytes, thumb_bytes, width, height = await get_redgifs_media(gif_match.group(1))
-        elif tw_match:
-            video_bytes, thumb_bytes, width, height = await get_twitter_media(tw_match.group(1))
-        elif ig_match:
-            video_bytes, thumb_bytes, width, height = await get_instagram_reel(ig_match.group(1))
-        elif rd_match:
-            # Handles any Reddit link format safely
-            video_bytes, thumb_bytes, width, height = await get_reddit_media(raw_text=text)
+        status_id = tw_match.group(1)
+        video_bytes, width, height = await get_twitter_media(status_id)
 
         if video_bytes:
             await bot.edit_message_text(
@@ -83,7 +121,7 @@ async def process_update(update_data):
             )
             
             video_file = BytesIO(video_bytes)
-            video_file.name = "media.mp4"
+            video_file.name = "twitter_video.mp4"
 
             send_kwargs = {
                 "chat_id": chat_id,
@@ -91,9 +129,6 @@ async def process_update(update_data):
                 "reply_to_message_id": message_id,
                 "supports_streaming": True
             }
-            if width: send_kwargs["width"] = width
-            if height: send_kwargs["height"] = height
-            if thumb_bytes: send_kwargs["thumbnail"] = thumb_bytes
 
             await bot.send_video(**send_kwargs)
             await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
@@ -101,20 +136,19 @@ async def process_update(update_data):
             await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=status_msg.message_id, 
-                text="❌ Failed to extract video stream from this link."
+                text="❌ Failed to extract video stream. Make sure the tweet contains a native video."
             )
 
     except Exception as e:
-        # Print full stack trace to Vercel Logs
-        print(f"Unhandled Exception in process_update: {e}")
+        print(f"Unhandled Exception: {e}")
         traceback.print_exc()
         await bot.edit_message_text(
             chat_id=chat_id, 
             message_id=status_msg.message_id, 
-            text="❌ Error processing link. Please check server logs."
+            text="❌ Error processing link. Please try again later."
         )
 
-# Vercel Handler
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
@@ -132,4 +166,4 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b'Bot backend operational.')
+        self.wfile.write(b'Twitter Video Downloader Bot active.')

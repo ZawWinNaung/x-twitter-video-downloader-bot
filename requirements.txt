@@ -1,6 +1,2 @@
+httpx
 python-telegram-bot
-redgifs
-httpx[http2]
-yt-dlp
-python-dotenv
-Pillow
