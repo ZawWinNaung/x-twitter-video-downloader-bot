@@ -11,14 +11,13 @@ from telegram import Update, Bot
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Regex to extract tweet status ID from x.com or twitter.com URLs
 TWITTER_REGEX = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/([0-9]+)'
+MAX_TELEGRAM_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
 async def get_twitter_media(status_id: str):
-    """Extracts single video stream from X/Twitter via vxtwitter API."""
+    """Extracts a video stream from X/Twitter via vxtwitter API, falling back to lower resolution if > 50MB."""
     api_url = f"https://api.vxtwitter.com/Twitter/status/{status_id}"
-    
     headers = {"User-Agent": "TelegramBot/1.0"}
     
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -29,23 +28,59 @@ async def get_twitter_media(status_id: str):
         data = res.json()
         media_list = data.get("media_extended", [])
         
-        video_url = None
-        thumb_url = None
-        
-        # Look for the first video in the status
+        target_media = None
         for media in media_list:
-            if media.get("type") == "video":
-                video_url = media.get("url")
-                thumb_url = media.get("thumbnail_url")
+            if media.get("type") in ["video", "gif"]:
+                target_media = media
                 break
                 
-        if not video_url:
+        if not target_media:
             return None, None, None, None
-            
-        # Download video & thumbnail bytes
-        v_resp = await client.get(video_url)
-        video_bytes = v_resp.content if v_resp.status_code == 200 else None
+
+        thumb_url = target_media.get("thumbnail_url")
+        variants = target_media.get("variants", [])
+
+        # Collect candidate URLs sorted from highest to lowest quality
+        video_urls = []
+        if variants:
+            # Sort variants by bitrate if available (highest bitrate first)
+            sorted_variants = sorted(
+                [v for v in variants if v.get("content_type") == "video/mp4"],
+                key=lambda x: x.get("bitrate", 0),
+                reverse=True
+            )
+            video_urls = [v.get("url") for v in sorted_variants if v.get("url")]
+
+        # Fallback if variants list is empty
+        if not video_urls and target_media.get("url"):
+            video_urls = [target_media.get("url")]
+
+        video_bytes = None
         
+        # Try downloading each resolution candidate until one fits under 50 MB
+        for url in video_urls:
+            # Send a HEAD request first to check size without downloading full body
+            head_resp = await client.head(url)
+            content_length = head_resp.headers.get("Content-Length")
+
+            if content_length and int(content_length) > MAX_TELEGRAM_SIZE:
+                continue  # Skip this resolution if we know it's over 50MB
+
+            # Download actual video bytes
+            v_resp = await client.get(url)
+            if v_resp.status_code == 200:
+                if len(v_resp.content) <= MAX_TELEGRAM_SIZE:
+                    video_bytes = v_resp.content
+                    break  # Found an acceptable resolution
+
+        # If all candidates exceeded 50MB during HEAD check, grab smallest candidate as last effort
+        if not video_bytes and video_urls:
+            smallest_url = video_urls[-1]
+            v_resp = await client.get(smallest_url)
+            if v_resp.status_code == 200 and len(v_resp.content) <= MAX_TELEGRAM_SIZE:
+                video_bytes = v_resp.content
+
+        # Download thumbnail
         thumb_bytes = None
         if thumb_url:
             t_resp = await client.get(thumb_url)
@@ -71,7 +106,6 @@ async def process_update(update_data):
     chat_id = message.chat_id
     message_id = message.message_id
 
-    # Handle /start
     if text.startswith('/start'):
         await bot.send_message(
             chat_id=chat_id,
@@ -81,7 +115,6 @@ async def process_update(update_data):
         )
         return
 
-    # Match Twitter/X link
     tw_match = re.search(TWITTER_REGEX, text)
     if not tw_match:
         return
@@ -124,7 +157,7 @@ async def process_update(update_data):
             await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=status_msg.message_id, 
-                text="❌ Failed to extract video stream. Make sure the tweet contains a native video."
+                text="❌ Video is too large (over 50 MB even at lower resolutions) or couldn't be extracted."
             )
 
     except Exception as e:
