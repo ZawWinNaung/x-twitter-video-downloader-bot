@@ -8,7 +8,6 @@ from telegram import Update, Bot
 
 from api.config import BOT_TOKEN, TWITTER_REGEX
 from api.twitter import get_twitter_media
-from api.watermark import add_text_watermark
 
 
 async def process_update(update_data):
@@ -26,7 +25,7 @@ async def process_update(update_data):
     message = update.message
     raw_text = message.text
 
-    # 2. Guard check: Ensure text exists and is strictly a string (Fixes Pylance None Type Error)
+    # 2. Guard check: Ensure text exists and is strictly a string
     if not raw_text or not isinstance(raw_text, str):
         return
 
@@ -63,19 +62,10 @@ async def process_update(update_data):
             await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=status_msg.message_id, 
-                text="🎨 Applying watermark..."
-            )
-            
-            # Apply FFmpeg watermark (@x_twitter_videos_bot)
-            watermarked_bytes = await add_text_watermark(video_bytes)
-
-            await bot.edit_message_text(
-                chat_id=chat_id, 
-                message_id=status_msg.message_id, 
                 text="📤 Uploading video..."
             )
             
-            video_file = BytesIO(watermarked_bytes)
+            video_file = BytesIO(video_bytes)
             video_file.name = "twitter_video.mp4"
 
             send_kwargs = {
