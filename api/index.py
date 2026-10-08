@@ -1,93 +1,14 @@
-import os
 import re
 import json
-import logging
 import asyncio
 import traceback
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler
-import httpx
 from telegram import Update, Bot
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-TWITTER_REGEX = r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[a-zA-Z0-9_]+/status/([0-9]+)'
-MAX_TELEGRAM_SIZE = 50 * 1024 * 1024  # 50 MB
-
-
-async def get_twitter_media(status_id: str):
-    """Extracts a video stream from X/Twitter via vxtwitter API, falling back to lower resolution if > 50MB."""
-    api_url = f"https://api.vxtwitter.com/Twitter/status/{status_id}"
-    headers = {"User-Agent": "TelegramBot/1.0"}
-    
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        res = await client.get(api_url, headers=headers)
-        if res.status_code != 200:
-            return None, None, None, None
-            
-        data = res.json()
-        media_list = data.get("media_extended", [])
-        
-        target_media = None
-        for media in media_list:
-            if media.get("type") in ["video", "gif"]:
-                target_media = media
-                break
-                
-        if not target_media:
-            return None, None, None, None
-
-        thumb_url = target_media.get("thumbnail_url")
-        variants = target_media.get("variants", [])
-
-        # Collect candidate URLs sorted from highest to lowest quality
-        video_urls = []
-        if variants:
-            # Sort variants by bitrate if available (highest bitrate first)
-            sorted_variants = sorted(
-                [v for v in variants if v.get("content_type") == "video/mp4"],
-                key=lambda x: x.get("bitrate", 0),
-                reverse=True
-            )
-            video_urls = [v.get("url") for v in sorted_variants if v.get("url")]
-
-        # Fallback if variants list is empty
-        if not video_urls and target_media.get("url"):
-            video_urls = [target_media.get("url")]
-
-        video_bytes = None
-        
-        # Try downloading each resolution candidate until one fits under 50 MB
-        for url in video_urls:
-            # Send a HEAD request first to check size without downloading full body
-            head_resp = await client.head(url)
-            content_length = head_resp.headers.get("Content-Length")
-
-            if content_length and int(content_length) > MAX_TELEGRAM_SIZE:
-                continue  # Skip this resolution if we know it's over 50MB
-
-            # Download actual video bytes
-            v_resp = await client.get(url)
-            if v_resp.status_code == 200:
-                if len(v_resp.content) <= MAX_TELEGRAM_SIZE:
-                    video_bytes = v_resp.content
-                    break  # Found an acceptable resolution
-
-        # If all candidates exceeded 50MB during HEAD check, grab smallest candidate as last effort
-        if not video_bytes and video_urls:
-            smallest_url = video_urls[-1]
-            v_resp = await client.get(smallest_url)
-            if v_resp.status_code == 200 and len(v_resp.content) <= MAX_TELEGRAM_SIZE:
-                video_bytes = v_resp.content
-
-        # Download thumbnail
-        thumb_bytes = None
-        if thumb_url:
-            t_resp = await client.get(thumb_url)
-            if t_resp.status_code == 200:
-                thumb_bytes = t_resp.content
-
-    return video_bytes, thumb_bytes, None, None
+from api.config import BOT_TOKEN, TWITTER_REGEX
+from api.twitter import get_twitter_media
+from api.watermark import add_text_watermark
 
 
 async def process_update(update_data):
@@ -98,14 +19,22 @@ async def process_update(update_data):
     bot = Bot(token=BOT_TOKEN)
     update = Update.de_json(update_data, bot)
     
-    if not update or not update.message or not update.message.text:
+    # 1. Guard check for update and message
+    if not update or not update.message:
         return
 
     message = update.message
-    text = message.text
+    raw_text = message.text
+
+    # 2. Guard check: Ensure text exists and is strictly a string (Fixes Pylance None Type Error)
+    if not raw_text or not isinstance(raw_text, str):
+        return
+
+    text: str = raw_text
     chat_id = message.chat_id
     message_id = message.message_id
 
+    # 3. Safe startswith check
     if text.startswith('/start'):
         await bot.send_message(
             chat_id=chat_id,
@@ -115,6 +44,7 @@ async def process_update(update_data):
         )
         return
 
+    # 4. Safe regex search with string guaranteed
     tw_match = re.search(TWITTER_REGEX, text)
     if not tw_match:
         return
@@ -133,10 +63,19 @@ async def process_update(update_data):
             await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=status_msg.message_id, 
+                text="🎨 Applying watermark..."
+            )
+            
+            # Apply FFmpeg watermark (@x_twitter_videos_bot)
+            watermarked_bytes = await add_text_watermark(video_bytes)
+
+            await bot.edit_message_text(
+                chat_id=chat_id, 
+                message_id=status_msg.message_id, 
                 text="📤 Uploading video..."
             )
             
-            video_file = BytesIO(video_bytes)
+            video_file = BytesIO(watermarked_bytes)
             video_file.name = "twitter_video.mp4"
 
             send_kwargs = {
@@ -157,7 +96,7 @@ async def process_update(update_data):
             await bot.edit_message_text(
                 chat_id=chat_id, 
                 message_id=status_msg.message_id, 
-                text="❌ Video is too large (over 50 MB even at lower resolutions) or couldn't be extracted."
+                text="❌ Video is too large (over 50 MB) or couldn't be extracted."
             )
 
     except Exception as e:
